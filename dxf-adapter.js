@@ -12,6 +12,7 @@ function fixText(e) {
 }
 function fixEntity(e) {
   switch (e.type) {
+    case 'LWPOLYLINE': e.flag = ((e.flag || 0) & 1 ? 512 : 0) | ((e.flag || 0) & 128 ? 256 : 0); break;
     case 'ARC': e.startAngle = rad(e.startAngle); e.endAngle = rad(e.endAngle); break;
     case 'INSERT': e.rotation = rad(e.rotation || 0); break;
     case 'TEXT': fixText(e); break;

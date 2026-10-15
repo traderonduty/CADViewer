@@ -83,6 +83,10 @@ export function cleanSpecials(t) {
     .replace(/\\U\+([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
 
+// DWG stores an LWPOLYLINE's "closed" bit as 512 (bit 1 means "has extrusion");
+// old-style POLYLINE and DXF data use bit 1. The DXF adapter maps DXF to the DWG form.
+export function isClosedPoly(e) { return e.type === 'LWPOLYLINE' ? !!(e.flag & 512) : !!(e.flag & 1); }
+
 // ---------- affine matrices: [a,b,c,d,e,f]  x' = a x + c y + e ; y' = b x + d y + f
 const I = [1, 0, 0, 1, 0, 0];
 const mul = (m, n) => [
@@ -429,7 +433,7 @@ export function buildModel(db, opts = {}) {
           let verts = e.vertices || [];
           if (e.type === 'POLYLINE2D') { const fit = verts.filter(v => v.flag & 8); verts = fit.length >= 2 ? fit : verts.filter(v => !(v.flag & 16)); }
           if (verts.length < 2) break;
-          const closed = !!(e.flag & 1);
+          const closed = isClosedPoly(e);
           const mm = ocs(e, m);
           const pts = tpts(mm, vertsBulge(verts, closed));
           emitPoly(pts, false, style());
@@ -599,7 +603,7 @@ export function buildModel(db, opts = {}) {
     switch (e.type) {
       case 'LINE': { const dx = e.endPoint.x - e.startPoint.x, dy = e.endPoint.y - e.startPoint.y; info.push(['Length', Math.hypot(dx, dy), 'len'], ['Angle', Math.atan2(dy, dx), 'ang'], ['Start', P(e.startPoint), 'pt'], ['End', P(e.endPoint), 'pt']); break; }
       case 'LWPOLYLINE': case 'POLYLINE2D': {
-        const v = e.vertices || []; const closed = !!(e.flag & 1); let L = 0, A = 0;
+        const v = e.vertices || []; const closed = isClosedPoly(e); let L = 0, A = 0;
         for (let i = 0; i < (closed ? v.length : v.length - 1); i++) { const a = v[i], b = v[(i + 1) % v.length]; L += Math.hypot(b.x - a.x, b.y - a.y); A += a.x * b.y - b.x * a.y; }
         info.push(['Vertices', v.length, 'n'], ['Closed', closed ? 'Yes' : 'No', 's'], ['Length', L, 'len']);
         if (closed) info.push(['Area', Math.abs(A / 2), 'area']);
