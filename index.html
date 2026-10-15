@@ -975,7 +975,8 @@ function drawSpace(i, M, sDev, vr, quick, isModel) {
     ctx.fillStyle = RO?.mono ? '#555' : colorFor(st.color); ctx.fill(f.path, 'evenodd');
   }
   ctx.globalAlpha = 1;
-  ctx.lineWidth = (RO ? RO.line : dpr * 0.9) / sDev;
+  const baseLW = (RO ? RO.line : dpr * 0.9) / sDev;
+  ctx.lineWidth = baseLW;
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   let lastStyle = -1, lastDash = null;
   for (const g of P.groups) {
@@ -985,6 +986,8 @@ function drawSpace(i, M, sDev, vr, quick, isModel) {
     g.path ||= buildPath(sp, g.idx);
     if (g.style !== lastStyle) {
       ctx.strokeStyle = RO?.mono ? '#000' : colorFor(st.color); lastStyle = g.style;
+      if (st.width) { ctx.lineWidth = Math.max(st.width, baseLW); ctx.lineCap = 'butt'; ctx.lineJoin = 'miter'; }
+      else if (ctx.lineWidth !== baseLW) { ctx.lineWidth = baseLW; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; }
       let dash = st.dash;
       if (dash && (quick || dash.reduce((a, b) => a + b, 0) * sDev < 4 || Math.min(...dash) * sDev < 0.8)) dash = null;
       if (dash !== lastDash) { ctx.setLineDash(dash || []); lastDash = dash; }
@@ -1548,6 +1551,7 @@ function pdfSpace(doc, i, M, k, vr, o, gs) {
       if (open) { doc.stroke(); open = false; }
       cur = g.style;
       const [r, gg, b] = o.mono ? [0, 0, 0] : hexRgb(colorFor(st.color)); doc.setDrawColor(r, gg, b);
+      if (st.width) { doc.setLineWidth(Math.max(st.width * k, o.line)); doc.setLineCap('butt'); doc.setLineJoin('miter'); } else { doc.setLineWidth(o.line); doc.setLineCap('round'); doc.setLineJoin('round'); }
       const d = st.dash;
       if (d && d.reduce((a2, b2) => a2 + b2, 0) * k >= 1 && Math.min(...d) * k >= 0.12) doc.setLineDashPattern(d.map(v => +(v * k).toFixed(3)), 0); else doc.setLineDashPattern([], 0);
     }

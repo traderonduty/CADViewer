@@ -159,10 +159,11 @@ export function buildModel(db, opts = {}) {
 
   // styles = (layer, colour, dash) groups
   const styles = []; const styleIdx = new Map();
-  const styleOf = (li, rgb, dash) => {
-    const k = li + '|' + rgb + '|' + (dash ? dash.join(',') : '');
+  const styleOf = (li, rgb, dash, width) => {
+    width = width > 0 ? +width.toPrecision(4) : 0;
+    const k = li + '|' + rgb + '|' + (dash ? dash.join(',') : '') + (width ? '|w' + width : '');
     let s = styleIdx.get(k);
-    if (s === undefined) { s = styles.length; styleIdx.set(k, s); styles.push({ layer: li, color: rgb, dash }); }
+    if (s === undefined) { s = styles.length; styleIdx.set(k, s); styles.push(width ? { layer: li, color: rgb, dash, width } : { layer: li, color: rgb, dash }); }
     return s;
   };
 
@@ -250,7 +251,18 @@ export function buildModel(db, opts = {}) {
       }
       return out;
     };
-    const ocs = (e, m) => (e.extrusionDirection && e.extrusionDirection.z < 0) ? mul(m, MIRX) : m;
+    // Object Coordinate System → plan view (AutoCAD "arbitrary axis algorithm"), with elevation along the normal.
+    const ocs = (e, m, elev = 0) => {
+      const N0 = e.extrusionDirection; if (!N0) return m;
+      const L = Math.hypot(N0.x || 0, N0.y || 0, N0.z || 0); if (L < 1e-9) return m;
+      const N = [(N0.x || 0) / L, (N0.y || 0) / L, (N0.z || 0) / L];
+      if (Math.abs(N[0]) < 1e-9 && Math.abs(N[1]) < 1e-9 && N[2] > 0) return m;
+      let ax = (Math.abs(N[0]) < 1 / 64 && Math.abs(N[1]) < 1 / 64) ? [N[2], 0, -N[0]] /* Wy × N */ : [-N[1], N[0], 0] /* Wz × N */;
+      const al = Math.hypot(...ax); ax = ax.map(v => v / al);
+      const ay = [N[1] * ax[2] - N[2] * ax[1], N[2] * ax[0] - N[0] * ax[2], N[0] * ax[1] - N[1] * ax[0]];
+      return mul(m, [ax[0], ax[1], ay[0], ay[1], (elev || 0) * N[0], (elev || 0) * N[1]]);
+    };
+    const zOf = (p) => (p && typeof p.z === 'number') ? p.z : 0;
 
     function splinePts(e) {
       const cps = e.controlPoints || [];
@@ -277,10 +289,10 @@ export function buildModel(db, opts = {}) {
       return cps.flatMap(p => [p.x, p.y]);
     }
 
-    function ellipsePts(cx, cy, mx, my, ratio, s0, s1) {
+    function ellipsePts(cx, cy, mx, my, ratio, s0, s1, minor) {
       let sweep = s1 - s0; while (sweep <= 0) sweep += Math.PI * 2; if (sweep > Math.PI * 2 + 1e-9) sweep = Math.PI * 2;
       const n = Math.max(8, Math.min(256, Math.ceil(sweep / (Math.PI * 2) * 96)));
-      const nx = -my * ratio, ny = mx * ratio; const out = [];
+      const nx = minor ? minor[0] : -my * ratio, ny = minor ? minor[1] : mx * ratio; const out = [];
       for (let i = 0; i <= n; i++) { const t = s0 + sweep * i / n; const c = Math.cos(t), s = Math.sin(t); out.push(cx + mx * c + nx * s, cy + my * c + ny * s); }
       return out;
     }
@@ -408,7 +420,7 @@ export function buildModel(db, opts = {}) {
       let lines = [{ text: cleanSpecials(d.text), hf: 1 }];
       if (e.mtextFlag === 2 || (/\\P|\{\\/.test(d.text || ''))) lines = parseMText(d.text);
       if (!lines.length || !lines.some(l => l.text.trim())) return;
-      addText(ocs(d, m), { x: p.x, y: p.y, rot: d.rotation || 0, h: d.textHeight || 1, wf: d.xScale || 1, lines, ax, ay }, ctx, e);
+      addText(ocs(d, m, zOf(d.startPoint) || d.elevation || 0), { x: p.x, y: p.y, rot: d.rotation || 0, h: d.textHeight || 1, wf: d.xScale || 1, lines, ax, ay }, ctx, e);
     }
 
     function emit(e, m, ctx, depth) {
@@ -434,16 +446,19 @@ export function buildModel(db, opts = {}) {
           if (e.type === 'POLYLINE2D') { const fit = verts.filter(v => v.flag & 8); verts = fit.length >= 2 ? fit : verts.filter(v => !(v.flag & 16)); }
           if (verts.length < 2) break;
           const closed = isClosedPoly(e);
-          const mm = ocs(e, m);
+          const mm = ocs(e, m, e.elevation ?? zOf(verts[0]));
           const pts = tpts(mm, vertsBulge(verts, closed));
-          emitPoly(pts, false, style());
+          let wd = e.constantWidth || 0;
+          if (!wd && e.type === 'POLYLINE2D' && e.startWidth && e.startWidth === e.endWidth) wd = e.startWidth;
+          if (!wd && verts.length && verts.every(v => (v.startWidth || 0) > 0 && v.startWidth === verts[0].startWidth && (v.endWidth ?? v.startWidth) === v.startWidth)) wd = verts[0].startWidth;
+          emitPoly(pts, false, wd > 0 ? styleOf(li, color, dash, wd * mscale(m)) : style());
           const vv = verts.map(v => tp(mm, v.x, v.y));
           vv.forEach((p, i) => { snap(p[0], p[1], 0, li); const q = vv[i + 1] || (closed ? vv[0] : null); if (q && !verts[i].bulge) snap((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, 1, li); });
           // wide polylines (constant width) → also fill
           break;
         }
         case 'ARC': {
-          const mm = ocs(e, m);
+          const mm = ocs(e, m, zOf(e.center));
           const pts = arcPts(e.center.x, e.center.y, e.radius, e.startAngle, e.endAngle);
           const w = tpts(mm, pts); emitPoly(w, false, style());
           snap(w[0], w[1], 0, li); snap(w[w.length - 2], w[w.length - 1], 0, li);
@@ -451,14 +466,18 @@ export function buildModel(db, opts = {}) {
           break;
         }
         case 'CIRCLE': {
-          const mm = ocs(e, m);
+          const mm = ocs(e, m, zOf(e.center));
           const pts = arcPts(e.center.x, e.center.y, e.radius, 0, Math.PI * 2);
           emitPoly(tpts(mm, pts), false, style());
           const c = tp(mm, e.center.x, e.center.y); snap(c[0], c[1], 2, li);
           break;
         }
         case 'ELLIPSE': {
-          const pts = ellipsePts(e.center.x, e.center.y, e.majorAxisEndPoint.x, e.majorAxisEndPoint.y, e.axisRatio || 1, e.startAngle || 0, (e.endAngle ?? Math.PI * 2));
+          const M3 = e.majorAxisEndPoint, N0 = e.extrusionDirection || { x: 0, y: 0, z: 1 };
+          const nl = Math.hypot(N0.x || 0, N0.y || 0, N0.z || 0) || 1, Nn = [(N0.x || 0) / nl, (N0.y || 0) / nl, (nl === 1 && !N0.z && !N0.x && !N0.y) ? 1 : (N0.z || 0) / nl];
+          const mz = M3.z || 0, rr = e.axisRatio || 1;
+          const minor = [(Nn[1] * mz - Nn[2] * M3.y) * rr, (Nn[2] * M3.x - Nn[0] * mz) * rr]; // (N × major) · ratio, projected to plan
+          const pts = ellipsePts(e.center.x, e.center.y, M3.x, M3.y, rr, e.startAngle || 0, (e.endAngle ?? Math.PI * 2), minor);
           const w = tpts(m, pts); emitPoly(w, false, style());
           const c = tp(m, e.center.x, e.center.y); snap(c[0], c[1], 2, li);
           break;
@@ -469,14 +488,14 @@ export function buildModel(db, opts = {}) {
           break;
         }
         case 'SOLID': case 'TRACE': {
-          const mm = ocs(e, m);
+          const mm = ocs(e, m, e.elevation ?? zOf(e.corner1));
           const c = [e.corner1, e.corner2, e.corner4 || e.corner3, e.corner3].filter(Boolean);
           const r = tpts(mm, c.flatMap(p => [p.x, p.y]));
           emitFill([r], plain(), 0);
           break;
         }
         case 'HATCH': {
-          const mm = ocs(e, m);
+          const mm = ocs(e, m, zOf(e.elevationPoint) || e.elevation || 0);
           const rings = hatchRings(e);
           if (!rings.length) break;
           const solid = e.solidFill === 1 || /^SOLID$/i.test(e.patternName || '');
@@ -542,10 +561,9 @@ export function buildModel(db, opts = {}) {
         case 'MLINE': {
           const vs = e.vertices || []; if (vs.length < 2) break;
           const nl = e.numberOfLines || (vs[0].lines || []).length;
-          const sc = e.scale || 1;
           for (let k = 0; k < nl; k++) {
             const pts = [];
-            for (const v of vs) { const off = ((v.lines || [])[k]?.segmentParams || [0])[0] * sc; pts.push(v.vertex.x + v.miterDirection.x * off, v.vertex.y + v.miterDirection.y * off); }
+            for (const v of vs) { const off = ((v.lines || [])[k]?.segmentParams || [0])[0]; /* already in drawing units */ pts.push(v.vertex.x + v.miterDirection.x * off, v.vertex.y + v.miterDirection.y * off); }
             emitPoly(tpts(m, pts), !!(e.flags & 2), style());
           }
           break;
@@ -554,7 +572,7 @@ export function buildModel(db, opts = {}) {
           const b = blocks.get(e.name);
           if (!b || depth >= 16) break;
           const bp = b.basePoint || { x: 0, y: 0 };
-          let base = ocs(e, m);
+          let base = ocs(e, m, zOf(e.insertionPoint));
           const cols = Math.max(1, e.columnCount || 1), rows = Math.max(1, e.rowCount || 1);
           const named = !/^(\*|A\$C)/.test(e.name);
           pushBB();
